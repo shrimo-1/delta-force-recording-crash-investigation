@@ -1,0 +1,13 @@
+evidence/
+*.dmp
+*.hdmp
+*.mp4
+*.mkv
+*.log
+*.etl
+*.evtx
+*.zip
+*.7z
+tests/runtime-fixture/
+.DS_Store
+Thumbs.db
