@@ -1,46 +1,50 @@
-# Delta Force × iCreate 录制崩溃调查
+# Delta Force × iCreate Recording Crash Investigation
 
-一个面向 Windows 版《三角洲行动》、腾讯“洲洲时刻”与 D3D12/NVIDIA 录制冲突的**非官方、证据驱动**调查项目。
+[中文](README.zh-CN.md) | **English**
 
-本仓库整理了一次真实故障调查中可公开复用的部分：崩溃链、证据分级、安全只读取证工具、保留录制功能的规避流程，以及厂商侧修复建议。仓库不包含游戏文件、腾讯组件、原始 Dump、原始日志或用户身份信息。
+An **unofficial, evidence-driven** investigation into a recording-related crash affecting the Windows version of *Delta Force*, involving Tencent's iCreate "Zhouzhou Moment" (洲洲时刻) recorder and a D3D12/NVIDIA capture conflict.
 
-## 结论摘要
+This repository publishes the reusable parts of a real failure investigation: the crash chain, evidence grading, a safe read-only evidence collector, a mitigation procedure that keeps recording enabled, and vendor-side fix recommendations. It contains no game files, no Tencent components, no raw dumps, no raw logs, and no user-identifying information.
 
-在已分析的样本中，最深可证实链路为：
+> The detailed documents under [`docs/`](docs) are currently written in Chinese only.
 
-1. 对局结束触发 `StopRecorder` / 捕获资源销毁；
-2. 同一时间窗口，录制成功提示浮层上传 `record_success.png`；
-3. Windows 记录 `nvlddmkm` Event ID 153，并产生 GPU WATCHDOG `0x141`；
-4. 游戏随后观察到 `DXGI_ERROR_DEVICE_REMOVED`，移除原因是 `DXGI_ERROR_DEVICE_HUNG`；
-5. 腾讯 `graphics-hook64.dll 1.8.0.0` 的 D3D12 图片上传路径未检查对象创建结果，在 `+0x1AB42` 或 `+0x1AB89` 解引用空的 command list / command queue；
-6. 同一路径还存在无限 fence 等待，因此用户体验可能是“先冻结，再退回桌面”。
+## Summary of findings
 
-确定无疑的是：**未检查失败结果并解引用空 COM 指针属于录制浮层组件缺陷。** 现有公开样本不足以唯一证明最先导致 GPU 超时的是哪一个 command list、共享资源或跨队列同步点，因此上游竞态仍应表述为“最可信、但需 DRED/厂商符号最终确认”。
+In the analyzed sample, the deepest chain that can be substantiated is:
 
-完整证据边界见 [`docs/root-cause.md`](docs/root-cause.md)。
+1. The end of a match triggers `StopRecorder` / capture resource destruction;
+2. In the same time window, the recording-success toast overlay uploads `record_success.png`;
+3. Windows logs `nvlddmkm` Event ID 153 and produces a GPU WATCHDOG `0x141`;
+4. The game then observes `DXGI_ERROR_DEVICE_REMOVED`, with removal reason `DXGI_ERROR_DEVICE_HUNG`;
+5. In Tencent's `graphics-hook64.dll 1.8.0.0`, the D3D12 image upload path does not check object creation results, and dereferences a null command list / command queue at `+0x1AB42` or `+0x1AB89`;
+6. The same path also performs an unbounded fence wait, so the user-visible symptom can be "freeze first, then straight back to the desktop".
 
-## 不关闭“洲洲时刻”的处理顺序
+What is certain: **not checking a failed result and then dereferencing a null COM pointer is a defect in the recording overlay component.** The available public samples are not sufficient to uniquely prove which command list, shared resource, or cross-queue synchronization point first caused the GPU timeout, so the upstream race should still be described as "most credible, but pending final confirmation via DRED / vendor symbols".
 
-### 用户侧最小变量
+The full evidence boundary is documented in [`docs/root-cause.md`](docs/root-cause.md).
 
-保持：
+## Working around the issue without disabling Zhouzhou Moment
 
-- 洲洲时刻开启；
-- 进程捕获；
-- NVENC；
-- 其余游戏画质与 BIOS 设置不变。
+### User-side minimal variable
 
-只关闭：
+Keep:
 
-- NVIDIA App 游戏内覆盖；
-- NVIDIA 游戏滤镜；
-- 其他会注入 Present/D3D12 的覆盖层。
+- the Zhouzhou Moment recorder enabled;
+- process capture;
+- NVENC;
+- all other game graphics and BIOS settings unchanged.
 
-然后执行三次“完整退出 WeGame → 冷启动游戏 → 完成第一局 → 停留到结算”的复测。这样可以区分“腾讯钩子自身缺陷”和“腾讯、NVIDIA 双覆盖层共同触发”。窗口捕获在本次调查中产生过黑屏，切换编码器也无法修复浮层上传路径，因此不作为首选变量。
+Turn off only:
 
-### 厂商侧无损规避
+- the NVIDIA App in-game overlay;
+- NVIDIA game filters;
+- any other overlay that injects into Present/D3D12.
 
-调查确认录制与游戏内提示浮层受不同配置控制。向腾讯申请：
+Then run three repeat tests of "fully exit WeGame → cold-start the game → complete the first match → stay through the results screen". This separates "a defect in Tencent's hook itself" from "Tencent and NVIDIA overlay layers jointly triggering it". Window capture produced a black screen during this investigation, and switching the encoder does not fix the overlay upload path, so it is not a first-choice variable.
+
+### Vendor-side lossless mitigation
+
+The investigation confirmed that recording and the in-game toast overlay are controlled by separate configuration. Ask Tencent for:
 
 ```text
 enableSDK=true
@@ -48,82 +52,82 @@ enableRecord=true
 overlayEnable=false
 ```
 
-目标是保留自动录制、NVENC、音频与剪辑，只停止把录制提示图片注入游戏进程。详见 [`docs/mitigation.md`](docs/mitigation.md)。
+The goal is to keep automatic recording, NVENC, audio, and clipping, while stopping the injection of recording-notification images into the game process. See [`docs/mitigation.md`](docs/mitigation.md) for details.
 
-## 安全取证工具
+## Safe evidence collector
 
-### 默认运行
+### Default run
 
 ```powershell
 $env:DELTA_FORCE_ROOT = 'D:\Games\DeltaForce\DeltaForce'
 .\tools\Collect-Evidence.ps1
 ```
 
-也可双击 `collect-evidence.bat`，或显式传入路径：
+You can also double-click `collect-evidence.bat`, or pass the path explicitly:
 
 ```powershell
 .\tools\Collect-Evidence.ps1 -GameRoot 'D:\Games\DeltaForce\DeltaForce' -LookbackHours 168
 ```
 
-默认行为：
+Default behavior:
 
-- 只读查询系统、事件日志、相关进程与 Dump 元数据；
-- 输出仅写入仓库下的 `evidence\<时间>`；
-- 对文本中的计算机名、用户名、用户目录和疑似长账号 ID 脱敏；
-- **不复制原始 Dump，不复制原始日志。**
+- read-only queries against system state, event logs, related processes, and dump metadata;
+- output written only to `evidence\<timestamp>` inside the repository;
+- computer name, user name, user profile path, and suspected long account IDs are redacted from text;
+- **raw dumps are not copied, and raw logs are not copied.**
 
-显式增加脱敏日志尾部：
+Explicitly add redacted log tails:
 
 ```powershell
 .\tools\Collect-Evidence.ps1 -GameRoot 'D:\Games\DeltaForce\DeltaForce' -IncludeLogTails
 ```
 
-只有在准备本地 WinDbg 分析时才使用：
+Only use this when you are preparing a local WinDbg analysis:
 
 ```powershell
 .\tools\Collect-Evidence.ps1 -GameRoot 'D:\Games\DeltaForce\DeltaForce' -IncludeDumps
 ```
 
-原始 Dump 可能含私人数据，提交 issue 前不要直接上传。详见 [`docs/evidence-guide.md`](docs/evidence-guide.md)。
+Raw dumps may contain private data; do not upload them directly before filing an issue. See [`docs/evidence-guide.md`](docs/evidence-guide.md).
 
-## 测试
+## Tests
 
-Windows PowerShell 5.1 或 PowerShell 7：
+Windows PowerShell 5.1 or PowerShell 7:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run.ps1
 ```
 
-测试覆盖：
+The tests cover:
 
-- 崩溃时间相关日志不会被“只取最新 N 份”遗漏；
-- 已知 `graphics-hook64` 签名识别；
-- 未知签名不会被误报为已确认根因；
-- 文本隐私脱敏；
-- 仓库中无常见令牌、手机号、长账号 ID、真实用户目录或原始证据文件。
+- crash-correlated logs are not missed by "most recent N files only" selection;
+- recognition of the known `graphics-hook64` signature;
+- unknown signatures are not misreported as a confirmed root cause;
+- text privacy redaction;
+- the repository contains no common tokens, phone numbers, long account IDs, real user profile paths, or raw evidence files.
 
-## 仓库结构
+## Repository layout
 
 ```text
 .
-├─ docs/                 调查结论、规避方案、证据指南、厂商修复建议
-├─ src/                  可复用的 PowerShell 取证函数
-├─ tools/                只读取证入口
-├─ tests/                无第三方依赖的行为与发布安全检查
-└─ collect-evidence.bat  Windows 快捷入口
+├─ docs/                  Findings, mitigation, evidence guide, vendor fix recommendations
+├─ src/                   Reusable PowerShell evidence functions
+├─ tools/                 Read-only evidence collection entry point
+├─ tests/                 Behavior and publication-safety tests with no third-party dependencies
+└─ collect-evidence.bat   Windows shortcut entry point
 ```
 
-## 证据优先原则
+## Evidence-first principles
 
-- API 报错点不一定是上游根因；`ID3D12Resource::Map` 只是观察到设备已挂起的位置。
-- 压力测试不覆盖“注入捕获 + 共享纹理 + 编码 + 停止销毁 + 同帧浮层上传”。
-- 不把相关性写成唯一因果；缺少 DRED、厂商 PDB 或失败 HRESULT 时明确保留边界。
-- 每轮 A/B 只改变一个变量，并记录冷启动、局次、结算时间和生成文件。
+- The point where an API reports an error is not necessarily the upstream root cause; `ID3D12Resource::Map` is only where the device was observed to be already hung.
+- Stress tests do not cover "injected capture + shared textures + encoding + stop/destroy + same-frame overlay upload".
+- Correlation is not written as unique causation; the boundary is stated explicitly when DRED, vendor PDBs, or a failing HRESULT are unavailable.
+- Each A/B round changes exactly one variable, and records the cold start, match count, results-screen timing, and generated files.
 
-## 商标与关联
+## Trademarks and affiliation
 
-《三角洲行动》、WeGame、“洲洲时刻”、NVIDIA、OBS 等名称归其各自权利人所有。本项目与腾讯、NVIDIA、OBS Project 无隶属或背书关系。
+*Delta Force*, WeGame, "Zhouzhou Moment" (洲洲时刻), NVIDIA, OBS, and other names belong to their respective owners. This project is not affiliated with, or endorsed by, Tencent, NVIDIA, or the OBS Project.
 
-## 许可证
+## License
 
 [MIT](LICENSE)
